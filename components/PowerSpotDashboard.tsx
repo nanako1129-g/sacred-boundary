@@ -88,6 +88,21 @@ async function fetchInsight(payload: {
   return (await res.json()) as { insight: string };
 }
 
+async function retry<T>(fn: () => Promise<T>, retries = 2, delayMs = 400): Promise<T> {
+  let lastError: unknown;
+  for (let i = 0; i <= retries; i += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (i < retries) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs * (i + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export default function PowerSpotDashboard() {
   const [details, setDetails] = useState<Record<string, SpotDetail>>({});
   const [activeSpotId, setActiveSpotId] = useState<string | null>(null);
@@ -100,21 +115,33 @@ export default function PowerSpotDashboard() {
 
   useEffect(() => {
     const loadAll = async () => {
-      try {
-        const entries = await Promise.all(
-          ALL_SPOTS.map(async (spot) => {
-            const elevation = await fetchElevation(spot.lat, spot.lon);
-            return [
-              spot.id,
-              {
-                ...elevation,
-                magnetic: estimateGeomagneticData(spot.lat, spot.lon),
-              },
-            ] as const;
-          }),
-        );
-        setDetails(Object.fromEntries(entries));
-      } catch {
+      const entries = await Promise.allSettled(
+        ALL_SPOTS.map(async (spot) => {
+          const elevation = await retry(() => fetchElevation(spot.lat, spot.lon), 2, 300);
+          return [
+            spot.id,
+            {
+              ...elevation,
+              magnetic: estimateGeomagneticData(spot.lat, spot.lon),
+            },
+          ] as const;
+        }),
+      );
+
+      const successEntries = entries
+        .filter((entry): entry is PromiseFulfilledResult<readonly [string, SpotDetail]> => {
+          return entry.status === "fulfilled";
+        })
+        .map((entry) => entry.value);
+
+      if (successEntries.length) {
+        setDetails((prev) => ({
+          ...prev,
+          ...Object.fromEntries(successEntries),
+        }));
+      }
+
+      if (entries.some((entry) => entry.status === "rejected")) {
         setError("一部の標高データの取得に失敗しました。");
       }
     };
@@ -179,7 +206,7 @@ export default function PowerSpotDashboard() {
     if (!currentDetail) {
       try {
         setLoadingId(spot.id);
-        const elevation = await fetchElevation(spot.lat, spot.lon);
+        const elevation = await retry(() => fetchElevation(spot.lat, spot.lon), 2, 300);
         const nextDetail: SpotDetail = {
           ...elevation,
           magnetic: estimateGeomagneticData(spot.lat, spot.lon),
@@ -206,7 +233,7 @@ export default function PowerSpotDashboard() {
       }));
 
       try {
-        const wiki = await fetchWikipediaSummary(spot.name);
+        const wiki = await retry(() => fetchWikipediaSummary(spot.name), 1, 400);
         currentWikiSummary = wiki.extract;
         setWikiDetails((prev) => ({
           ...prev,
@@ -352,7 +379,11 @@ export default function PowerSpotDashboard() {
                     <p className="leading-relaxed whitespace-pre-wrap">{activeInsight.text}</p>
                   )}
                   {activeInsight?.status === "error" && <p>情報を取得できませんでした</p>}
-                  {!activeInsight && <p>考察を生成中...</p>}
+                  {!activeInsight && (
+                    <p className="text-slate-600">
+                      標高と歴史情報が揃うと考察を生成します。
+                    </p>
+                  )}
                 </div>
               )}
             </div>

@@ -3,7 +3,7 @@
 import "leaflet/dist/leaflet.css";
 
 import L from "leaflet";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
 import {
   Bar,
@@ -28,12 +28,200 @@ type SpotDetail = {
 type WikiDetail = {
   status: "loading" | "success" | "error";
   extract?: string;
+  imageUrl?: string;
+  pageUrl?: string;
 };
 
 type InsightDetail = {
   status: "loading" | "success" | "error";
   text?: string;
+  summary?: string;
+  legendKeywords?: string[];
+  era?: string;
+  traditionType?: string;
+  evidence?: string[];
+  generatedAt?: string;
+  sourceModel?: string;
+  isFallback?: boolean;
 };
+
+function isHttpUrl(value: string) {
+  return /^https?:\/\/\S+$/i.test(value);
+}
+
+const DISCOVERED_SPOTS_STORAGE_KEY = "discovered-sacred-spot-ids";
+
+const FIXED_SPOT_MEDIA: Record<
+  string,
+  { imageUrl: string; caption: string; sourceUrl?: string }
+> = {
+  熊野那智大社: {
+    imageUrl: "https://loremflickr.com/900/420/japan,shrine,waterfall?lock=101",
+    caption: "熊野那智エリアを想起させる社叢と聖域のイメージ",
+    sourceUrl: "https://ja.wikipedia.org/wiki/%E7%86%8A%E9%87%8E%E9%82%A3%E6%99%BA%E5%A4%A7%E7%A4%BE",
+  },
+  恐山: {
+    imageUrl: "https://loremflickr.com/900/420/japan,mountain,mist?lock=102",
+    caption: "恐山の荒涼感を想起させる山岳イメージ",
+    sourceUrl: "https://ja.wikipedia.org/wiki/%E6%81%90%E5%B1%B1",
+  },
+  立山: {
+    imageUrl: "https://loremflickr.com/900/420/japan,alpine,mountain?lock=103",
+    caption: "立山の高山帯を想起させる山岳イメージ",
+    sourceUrl: "https://ja.wikipedia.org/wiki/%E7%AB%8B%E5%B1%B1%E9%80%A3%E5%B3%B0",
+  },
+};
+
+function getSpotMapImageUrl(spot: Spot) {
+  return `https://staticmap.openstreetmap.de/staticmap.php?center=${spot.lat},${spot.lon}&zoom=11&size=900x420&markers=${spot.lat},${spot.lon},red-pushpin`;
+}
+
+function getSpotMapEmbedUrl(spot: Spot) {
+  const latDelta = 0.06;
+  const lonDelta = 0.08;
+  const left = spot.lon - lonDelta;
+  const right = spot.lon + lonDelta;
+  const bottom = spot.lat - latDelta;
+  const top = spot.lat + latDelta;
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${left}%2C${bottom}%2C${right}%2C${top}&layer=mapnik&marker=${spot.lat}%2C${spot.lon}`;
+}
+
+function getPilgrimTitle(progressPercent: number) {
+  if (progressPercent >= 100) {
+    return "境界の語り部";
+  }
+  if (progressPercent >= 75) {
+    return "異界の巡礼者";
+  }
+  if (progressPercent >= 50) {
+    return "結界の探索者";
+  }
+  if (progressPercent >= 25) {
+    return "霊地ウォーカー";
+  }
+  return "旅立ちの観測者";
+}
+
+function getPilgrimRank(progressPercent: number) {
+  if (progressPercent >= 100) {
+    return 5;
+  }
+  if (progressPercent >= 75) {
+    return 4;
+  }
+  if (progressPercent >= 50) {
+    return 3;
+  }
+  if (progressPercent >= 25) {
+    return 2;
+  }
+  return 1;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getResonanceLabel(score: number) {
+  if (score >= 85) {
+    return "強い呼び声";
+  }
+  if (score >= 70) {
+    return "境界が近い";
+  }
+  if (score >= 55) {
+    return "静かな共鳴";
+  }
+  if (score >= 40) {
+    return "微かな気配";
+  }
+  return "観測段階";
+}
+
+function calculateResonanceScore(params: {
+  elevation: number;
+  geomagF: number;
+  wikiLength: number;
+  keywordCount: number;
+}) {
+  const elevationScore = clamp(params.elevation / 30, 0, 30);
+  const geomagDelta = Math.abs(params.geomagF - 46000);
+  const geomagScore = clamp(geomagDelta / 250, 0, 30);
+  const wikiScore = clamp(params.wikiLength / 70, 0, 20);
+  const keywordScore = clamp(params.keywordCount * 4, 0, 20);
+  const total = Math.round(elevationScore + geomagScore + wikiScore + keywordScore);
+
+  return {
+    total,
+    label: getResonanceLabel(total),
+    breakdown: {
+      elevation: Math.round(elevationScore),
+      geomagnetism: Math.round(geomagScore),
+      history: Math.round(wikiScore),
+      legend: Math.round(keywordScore),
+    },
+  };
+}
+
+function getResonanceReasons(breakdown: {
+  elevation: number;
+  geomagnetism: number;
+  history: number;
+  legend: number;
+}) {
+  const entries: Array<{ key: string; label: string; value: number; max: number; strongText: string; weakText: string }> =
+    [
+      {
+        key: "elevation",
+        label: "標高",
+        value: breakdown.elevation,
+        max: 30,
+        strongText: "標高が高く、地上の境界感を生みやすい地形です。",
+        weakText: "標高による非日常性は控えめです。",
+      },
+      {
+        key: "geomagnetism",
+        label: "地磁気",
+        value: breakdown.geomagnetism,
+        max: 30,
+        strongText: "地磁気の偏差が大きく、場の特異性が強く出ています。",
+        weakText: "地磁気は平均域に近く、特異性は小さめです。",
+      },
+      {
+        key: "history",
+        label: "歴史情報",
+        value: breakdown.history,
+        max: 20,
+        strongText: "歴史・由来の記述が厚く、意味づけの層が豊富です。",
+        weakText: "歴史情報がまだ少なく、解釈の材料が限定的です。",
+      },
+      {
+        key: "legend",
+        label: "伝承",
+        value: breakdown.legend,
+        max: 20,
+        strongText: "伝承キーワードが多く、物語性が強い地点です。",
+        weakText: "伝承キーワードが少なく、物語性はこれからです。",
+      },
+    ];
+
+  const sorted = [...entries].sort((a, b) => b.value - a.value);
+  const top = sorted[0];
+  const second = sorted[1];
+  const weakest = [...entries].sort((a, b) => a.value - b.value)[0];
+  const topRate = top.value / top.max;
+  const secondRate = second.value / second.max;
+  const weakRate = weakest.value / weakest.max;
+
+  const leadText = topRate >= 0.45 ? top.strongText : top.weakText;
+  const supportText =
+    secondRate >= 0.45
+      ? `${second.label}も支えになっていて、複合的に雰囲気を押し上げています。`
+      : `${second.label}は伸びしろがあり、今後の情報追加で評価が変わる余地があります。`;
+  const cautionText = weakRate < 0.25 ? weakest.weakText : "";
+
+  return [leadText, supportText, cautionText].filter(Boolean);
+}
 
 const sacredIcon = new L.Icon({
   iconUrl:
@@ -68,7 +256,7 @@ async function fetchWikipediaSummary(spotName: string) {
   if (!res.ok) {
     throw new Error("Wikipedia要約の取得に失敗しました。");
   }
-  return (await res.json()) as { extract: string };
+  return (await res.json()) as { extract: string; imageUrl?: string; pageUrl?: string };
 }
 
 async function fetchInsight(payload: {
@@ -85,7 +273,36 @@ async function fetchInsight(payload: {
   if (!res.ok) {
     throw new Error("考察の生成に失敗しました。");
   }
-  return (await res.json()) as { insight: string };
+  return (await res.json()) as {
+    insight: string;
+    summary?: string;
+    legend_keywords?: string[];
+    era?: string;
+    tradition_type?: string;
+    evidence?: string[];
+    generated_at?: string;
+    model?: string;
+    fallback?: boolean;
+  };
+}
+
+async function fetchCachedInsight(spotName: string) {
+  const res = await fetch(`/api/insight/cache?name=${encodeURIComponent(spotName)}`);
+  if (res.status === 404) {
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error("考察キャッシュの取得に失敗しました。");
+  }
+  return (await res.json()) as {
+    insight: string;
+    generated_at: string;
+    summary?: string;
+    legend_keywords?: string[];
+    era?: string;
+    tradition_type?: string;
+    evidence?: string[];
+  };
 }
 
 async function retry<T>(fn: () => Promise<T>, retries = 2, delayMs = 400): Promise<T> {
@@ -110,8 +327,31 @@ export default function PowerSpotDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [wikiDetails, setWikiDetails] = useState<Record<string, WikiDetail>>({});
   const [insightDetails, setInsightDetails] = useState<Record<string, InsightDetail>>({});
+  const [isEvidenceExpanded, setIsEvidenceExpanded] = useState(false);
+  const [isKeywordsExpanded, setIsKeywordsExpanded] = useState(false);
+  const [discoveredSpotIds, setDiscoveredSpotIds] = useState<string[]>([]);
+  const [justDiscoveredSpotId, setJustDiscoveredSpotId] = useState<string | null>(null);
+  const [titleToast, setTitleToast] = useState<string | null>(null);
+  const [discoveryToast, setDiscoveryToast] = useState<string | null>(null);
+  const [failedImageSpotIds, setFailedImageSpotIds] = useState<Record<string, boolean>>({});
   const [sortKey, setSortKey] = useState<"elevation" | "magnetic">("elevation");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const totalSacredSpots = useMemo(
+    () => ALL_SPOTS.filter((spot) => spot.type === "sacred").length,
+    [],
+  );
+  const discoveredSacredCount = useMemo(
+    () =>
+      discoveredSpotIds.filter((id) =>
+        ALL_SPOTS.some((spot) => spot.id === id && spot.type === "sacred"),
+      ).length,
+    [discoveredSpotIds],
+  );
+  const discoveredProgressPercent =
+    totalSacredSpots > 0 ? Math.round((discoveredSacredCount / totalSacredSpots) * 100) : 0;
+  const pilgrimTitle = getPilgrimTitle(discoveredProgressPercent);
+  const pilgrimRank = getPilgrimRank(discoveredProgressPercent);
+  const prevPilgrimRankRef = useRef<number | null>(null);
 
   useEffect(() => {
     const loadAll = async () => {
@@ -147,6 +387,21 @@ export default function PowerSpotDashboard() {
     };
 
     void loadAll();
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DISCOVERED_SPOTS_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        setDiscoveredSpotIds(parsed.filter((id): id is string => typeof id === "string"));
+      }
+    } catch {
+      // localStorage が不正な場合は無視して続行
+    }
   }, []);
 
   const chartData = useMemo(() => {
@@ -195,11 +450,104 @@ export default function PowerSpotDashboard() {
   const activeSpot = ALL_SPOTS.find((spot) => spot.id === activeSpotId) ?? null;
   const activeDetail = activeSpot ? details[activeSpot.id] : null;
   const activeWiki = activeSpot ? wikiDetails[activeSpot.id] : null;
+  const activeSpotFixedMedia = activeSpot ? FIXED_SPOT_MEDIA[activeSpot.name] : undefined;
+  const activeWikiImageUrl =
+    activeSpotFixedMedia?.imageUrl ??
+    activeWiki?.imageUrl ??
+    (activeSpot ? getSpotMapImageUrl(activeSpot) : undefined);
+  const activeWikiPageUrl = activeSpotFixedMedia?.sourceUrl ?? activeWiki?.pageUrl;
+  const activeImageCaption =
+    activeSpotFixedMedia?.caption ??
+    (activeWiki?.imageUrl ? "Wikipedia由来の写真" : "地点周辺の地図イメージ");
+  const shouldUseMapEmbed =
+    activeSpot
+      ? !activeSpotFixedMedia &&
+        (activeWiki?.status === "error" || !!failedImageSpotIds[activeSpot.id] || !activeWiki?.imageUrl)
+      : false;
   const activeInsight = activeSpot ? insightDetails[activeSpot.id] : null;
+  const activeResonance = useMemo(() => {
+    if (
+      !activeSpot ||
+      activeSpot.type !== "sacred" ||
+      !activeDetail ||
+      activeDetail.elevation == null ||
+      !activeWiki?.extract
+    ) {
+      return null;
+    }
+    return calculateResonanceScore({
+      elevation: activeDetail.elevation,
+      geomagF: activeDetail.magnetic.totalIntensityNt,
+      wikiLength: activeWiki.extract.length,
+      keywordCount: activeInsight?.legendKeywords?.length ?? 0,
+    });
+  }, [activeSpot, activeDetail, activeWiki, activeInsight]);
+  const activeResonanceReasons = useMemo(() => {
+    if (!activeResonance) {
+      return [];
+    }
+    return getResonanceReasons(activeResonance.breakdown);
+  }, [activeResonance]);
+  const visibleKeywords = isKeywordsExpanded
+    ? (activeInsight?.legendKeywords ?? [])
+    : (activeInsight?.legendKeywords ?? []).slice(0, 4);
+  const visibleEvidence = isEvidenceExpanded
+    ? (activeInsight?.evidence ?? [])
+    : (activeInsight?.evidence ?? []).slice(0, 2);
+
+  useEffect(() => {
+    setIsEvidenceExpanded(false);
+    setIsKeywordsExpanded(false);
+  }, [activeSpotId]);
+
+  useEffect(() => {
+    const prevRank = prevPilgrimRankRef.current;
+    prevPilgrimRankRef.current = pilgrimRank;
+
+    if (prevRank == null) {
+      return;
+    }
+    if (pilgrimRank <= prevRank || !justDiscoveredSpotId) {
+      return;
+    }
+
+    setTitleToast(`称号アップ: ${pilgrimTitle}`);
+    const timer = setTimeout(() => {
+      setTitleToast(null);
+    }, 2800);
+    return () => clearTimeout(timer);
+  }, [pilgrimRank, pilgrimTitle, justDiscoveredSpotId]);
+
+  useEffect(() => {
+    if (!justDiscoveredSpotId) {
+      return;
+    }
+    const discoveredSpot = ALL_SPOTS.find((spot) => spot.id === justDiscoveredSpotId);
+    if (!discoveredSpot || discoveredSpot.type !== "sacred") {
+      return;
+    }
+    setDiscoveryToast(`新発見 +1: ${discoveredSpot.name}`);
+    const timer = setTimeout(() => {
+      setDiscoveryToast(null);
+    }, 2200);
+    return () => clearTimeout(timer);
+  }, [justDiscoveredSpotId]);
 
   const handleSpotClick = async (spot: Spot) => {
     setActiveSpotId(spot.id);
     setError(null);
+    setJustDiscoveredSpotId(null);
+
+    if (spot.type === "sacred" && !discoveredSpotIds.includes(spot.id)) {
+      const nextDiscovered = [...discoveredSpotIds, spot.id];
+      setDiscoveredSpotIds(nextDiscovered);
+      setJustDiscoveredSpotId(spot.id);
+      try {
+        localStorage.setItem(DISCOVERED_SPOTS_STORAGE_KEY, JSON.stringify(nextDiscovered));
+      } catch {
+        // 保存失敗時もUIは継続
+      }
+    }
 
     let currentDetail = details[spot.id] ?? null;
 
@@ -237,22 +585,33 @@ export default function PowerSpotDashboard() {
         currentWikiSummary = wiki.extract;
         setWikiDetails((prev) => ({
           ...prev,
-          [spot.id]: { status: "success", extract: wiki.extract },
+          [spot.id]: {
+            status: "success",
+            extract: wiki.extract,
+            imageUrl: wiki.imageUrl,
+            pageUrl: wiki.pageUrl,
+          },
         }));
       } catch {
+        currentWikiSummary = `${spot.name}は日本各地で語り継がれる聖地のひとつとして知られる地点。`;
         setWikiDetails((prev) => ({
           ...prev,
-          [spot.id]: { status: "error" },
+          [spot.id]: {
+            status: "error",
+          },
         }));
       }
     }
+
+    const currentInsightState = insightDetails[spot.id];
+    const shouldFetchInsight = !currentInsightState || currentInsightState.status === "error";
 
     if (
       spot.type === "sacred" &&
       currentDetail &&
       currentDetail.elevation != null &&
       currentWikiSummary &&
-      !insightDetails[spot.id]
+      shouldFetchInsight
     ) {
       setInsightDetails((prev) => ({
         ...prev,
@@ -260,6 +619,24 @@ export default function PowerSpotDashboard() {
       }));
 
       try {
+        const cachedInsight = await fetchCachedInsight(spot.name);
+        if (cachedInsight?.insight) {
+          setInsightDetails((prev) => ({
+            ...prev,
+            [spot.id]: {
+              status: "success",
+              text: cachedInsight.insight,
+              summary: cachedInsight.summary,
+              legendKeywords: cachedInsight.legend_keywords ?? [],
+              era: cachedInsight.era,
+              traditionType: cachedInsight.tradition_type,
+              evidence: cachedInsight.evidence ?? [],
+              generatedAt: cachedInsight.generated_at,
+            },
+          }));
+          return;
+        }
+
         const insight = await fetchInsight({
           name: spot.name,
           elevation: currentDetail.elevation,
@@ -268,7 +645,18 @@ export default function PowerSpotDashboard() {
         });
         setInsightDetails((prev) => ({
           ...prev,
-          [spot.id]: { status: "success", text: insight.insight },
+          [spot.id]: {
+            status: "success",
+            text: insight.insight,
+            summary: insight.summary,
+            legendKeywords: insight.legend_keywords ?? [],
+            era: insight.era,
+            traditionType: insight.tradition_type,
+            evidence: insight.evidence ?? [],
+            generatedAt: insight.generated_at,
+            sourceModel: insight.model,
+            isFallback: insight.fallback,
+          },
         }));
       } catch {
         setInsightDetails((prev) => ({
@@ -281,9 +669,66 @@ export default function PowerSpotDashboard() {
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 md:p-8">
+      {titleToast && (
+        <div className="fixed right-4 top-4 z-[1000] animate-pulse rounded-lg border border-amber-300 bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-900 shadow-lg">
+          {titleToast}
+        </div>
+      )}
+      {discoveryToast && (
+        <div className="fixed right-4 top-16 z-[999] animate-pulse rounded-lg border border-emerald-300 bg-emerald-100 px-4 py-2 text-sm font-semibold text-emerald-900/95 shadow">
+          {discoveryToast}
+        </div>
+      )}
       <h1 className="text-2xl font-bold md:text-3xl">
         パワースポット環境データ分析（聖地 vs ランダム）
       </h1>
+      <section className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
+        <h2 className="mb-2 text-lg font-semibold text-slate-900">この分析で見ていること</h2>
+        <p className="text-sm leading-relaxed text-slate-700">
+          このアプリは、聖地とランダム地点の環境データを同じ条件で比較し、
+          「なぜ特別な場所と感じられてきたか」を複合的に読み解きます。
+          1つの要素だけで断定せず、複数の視点を重ねて解釈します。
+        </p>
+        <div className="mt-3 grid gap-2 text-xs text-slate-700 md:grid-cols-2">
+          <p>
+            <span className="font-semibold text-slate-900">1) 地形要素:</span>{" "}
+            標高データ（国土地理院API）から、非日常性の出やすい地形かを確認。
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">2) 地磁気要素:</span>{" "}
+            日本平均（約46000nT）との差分を用いて、場の特異性を評価。
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">3) 歴史要素:</span>{" "}
+            Wikipedia要約の情報量や文脈から、由来の厚みを反映。
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">4) 伝承要素:</span>{" "}
+            AI考察から抽出した伝承キーワードで、物語性を加点。
+          </p>
+        </div>
+        <p className="mt-3 text-xs text-slate-500">
+          ※「呼ばれ度」は体験を補助する探索指標です。学術的な断定ではなく、現地へ向かう動機づけを目的にしています。
+        </p>
+      </section>
+      <section className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+        <div className="mb-2 flex items-center justify-between text-sm">
+          <p className="font-semibold text-amber-900">巡礼進捗</p>
+          <p className="text-amber-800">
+            発見済み聖地 {discoveredSacredCount}/{totalSacredSpots}
+          </p>
+        </div>
+        <p className="mb-2 text-xs font-semibold text-amber-900">現在の称号: {pilgrimTitle}</p>
+        <div className="h-2 w-full overflow-hidden rounded-full bg-amber-100">
+          <div
+            className="h-full rounded-full bg-amber-400 transition-all duration-500"
+            style={{ width: `${discoveredProgressPercent}%` }}
+          />
+        </div>
+        <p className="mt-2 text-xs text-amber-800">
+          達成率: {discoveredProgressPercent}%（聖地をクリックすると記録されます）
+        </p>
+      </section>
 
       <div className="h-[500px] overflow-hidden rounded-xl border border-slate-300 bg-white shadow">
         <MapContainer
@@ -330,6 +775,11 @@ export default function PowerSpotDashboard() {
             <div className="space-y-1 text-sm">
               <p>
                 <span className="font-semibold">地点名:</span> {activeSpot.name}
+                {activeSpot.type === "sacred" && justDiscoveredSpotId === activeSpot.id && (
+                  <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                    新発見
+                  </span>
+                )}
               </p>
               <p>
                 <span className="font-semibold">分類:</span>{" "}
@@ -366,8 +816,92 @@ export default function PowerSpotDashboard() {
                 <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 p-3">
                   <p className="mb-1 font-semibold text-rose-900">歴史・由来</p>
                   {activeWiki?.status === "loading" && <p>取得中...</p>}
-                  {activeWiki?.status === "success" && <p className="leading-relaxed">{activeWiki.extract}</p>}
-                  {activeWiki?.status === "error" && <p>情報を取得できませんでした</p>}
+                  {activeWiki?.status === "success" && (
+                    <div className="space-y-2">
+                      {activeWikiImageUrl && (
+                        <>
+                          {shouldUseMapEmbed && activeSpot ? (
+                            <iframe
+                              src={getSpotMapEmbedUrl(activeSpot)}
+                              title={`${activeSpot.name}周辺地図`}
+                              className="h-40 w-full rounded-md border-0"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <img
+                              src={activeWikiImageUrl}
+                              alt={`${activeSpot.name}の写真`}
+                              className="h-40 w-full rounded-md object-cover"
+                              loading="lazy"
+                              onError={() => {
+                                if (!activeSpot) {
+                                  return;
+                                }
+                                setFailedImageSpotIds((prev) => ({ ...prev, [activeSpot.id]: true }));
+                              }}
+                            />
+                          )}
+                        </>
+                      )}
+                      {activeWikiImageUrl && (
+                        <p className="text-[11px] text-rose-700">{activeImageCaption}</p>
+                      )}
+                      <p className="leading-relaxed">{activeWiki.extract}</p>
+                      {activeWikiPageUrl && (
+                        <a
+                          href={activeWikiPageUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-rose-700 underline hover:text-rose-900"
+                        >
+                          Wikipediaで続きを読む
+                        </a>
+                      )}
+                    </div>
+                  )}
+                  {activeWiki?.status === "error" && (
+                    <div className="space-y-2">
+                      {activeWikiImageUrl && (
+                        <>
+                          {shouldUseMapEmbed && activeSpot ? (
+                            <iframe
+                              src={getSpotMapEmbedUrl(activeSpot)}
+                              title={`${activeSpot.name}周辺地図`}
+                              className="h-40 w-full rounded-md border-0"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <img
+                              src={activeWikiImageUrl}
+                              alt={`${activeSpot.name}の写真`}
+                              className="h-40 w-full rounded-md object-cover"
+                              loading="lazy"
+                              onError={() => {
+                                if (!activeSpot) {
+                                  return;
+                                }
+                                setFailedImageSpotIds((prev) => ({ ...prev, [activeSpot.id]: true }));
+                              }}
+                            />
+                          )}
+                        </>
+                      )}
+                      {activeWikiImageUrl && (
+                        <p className="text-[11px] text-rose-700">{activeImageCaption}</p>
+                      )}
+                      <p>情報を取得できませんでした</p>
+                      {activeWikiPageUrl && (
+                        <a
+                          href={activeWikiPageUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-rose-700 underline hover:text-rose-900"
+                        >
+                          参考ページを開く
+                        </a>
+                      )}
+                    </div>
+                  )}
                   {!activeWiki && <p>取得中...</p>}
                 </div>
               )}
@@ -376,13 +910,119 @@ export default function PowerSpotDashboard() {
                   <p className="mb-1 font-semibold text-violet-900">AIによる考察</p>
                   {activeInsight?.status === "loading" && <p>考察を生成中...</p>}
                   {activeInsight?.status === "success" && (
-                    <p className="leading-relaxed whitespace-pre-wrap">{activeInsight.text}</p>
+                    <div className="space-y-2">
+                      {activeInsight.summary && (
+                        <p className="rounded bg-violet-100 px-2 py-1 text-sm text-violet-900">
+                          {activeInsight.summary}
+                        </p>
+                      )}
+                      <p className="leading-relaxed whitespace-pre-wrap">{activeInsight.text}</p>
+                      {(activeInsight.era || activeInsight.traditionType) && (
+                        <p className="text-xs text-violet-800">
+                          時代: {activeInsight.era ?? "不詳"} / 伝承類型:{" "}
+                          {activeInsight.traditionType ?? "伝承"}
+                        </p>
+                      )}
+                      {!!activeInsight.legendKeywords?.length && (
+                        <div className="flex flex-wrap gap-1">
+                          {visibleKeywords.map((keyword) => (
+                            <span
+                              key={keyword}
+                              className="rounded-full bg-violet-200 px-2 py-0.5 text-xs text-violet-900"
+                            >
+                              {keyword}
+                            </span>
+                          ))}
+                          {activeInsight.legendKeywords.length > 4 && (
+                            <button
+                              type="button"
+                              onClick={() => setIsKeywordsExpanded((prev) => !prev)}
+                              className="rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-800 underline hover:text-violet-900"
+                            >
+                              {isKeywordsExpanded ? "閉じる" : "もっと見る"}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {!!activeInsight.evidence?.length && (
+                        <div className="text-xs text-violet-700">
+                          <span className="font-semibold">出典:</span>{" "}
+                          {visibleEvidence.map((source, index) => (
+                            <span key={`${source}-${index}`}>
+                              {index > 0 && " / "}
+                              {isHttpUrl(source) ? (
+                                <a
+                                  href={source}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline hover:text-violet-900"
+                                >
+                                  {source}
+                                </a>
+                              ) : (
+                                <span>{source}</span>
+                              )}
+                            </span>
+                          ))}
+                          {activeInsight.evidence.length > 2 && (
+                            <>
+                              {" "}
+                              <button
+                                type="button"
+                                onClick={() => setIsEvidenceExpanded((prev) => !prev)}
+                                className="underline hover:text-violet-900"
+                              >
+                                {isEvidenceExpanded ? "閉じる" : "もっと見る"}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                      {activeInsight.generatedAt && (
+                        <p className="text-[11px] text-violet-600">
+                          生成日時: {new Date(activeInsight.generatedAt).toLocaleString("ja-JP")}
+                        </p>
+                      )}
+                      {activeInsight.sourceModel && (
+                        <p className="text-[11px] text-violet-600">
+                          生成元: {activeInsight.sourceModel}
+                          {activeInsight.isFallback ? "（ローカル補完）" : ""}
+                        </p>
+                      )}
+                    </div>
                   )}
                   {activeInsight?.status === "error" && <p>情報を取得できませんでした</p>}
                   {!activeInsight && (
                     <p className="text-slate-600">
                       標高と歴史情報が揃うと考察を生成します。
                     </p>
+                  )}
+                </div>
+              )}
+              {activeSpot.type === "sacred" && activeResonance && (
+                <div className="mt-3 rounded-md border border-indigo-200 bg-indigo-50 p-3">
+                  <p className="mb-1 font-semibold text-indigo-900">統合分析（呼ばれ度）</p>
+                  <p className="text-sm text-indigo-900">
+                    {activeResonance.total}/100 - {activeResonance.label}
+                  </p>
+                  <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-indigo-100">
+                    <div
+                      className="h-full rounded-full bg-indigo-400 transition-all duration-700"
+                      style={{ width: `${activeResonance.total}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-indigo-800">
+                    内訳: 標高 {activeResonance.breakdown.elevation} / 地磁気{" "}
+                    {activeResonance.breakdown.geomagnetism} / 歴史情報{" "}
+                    {activeResonance.breakdown.history} / 伝承キーワード{" "}
+                    {activeResonance.breakdown.legend}
+                  </p>
+                  {!!activeResonanceReasons.length && (
+                    <ul className="mt-2 space-y-1 text-xs text-indigo-900">
+                      {activeResonanceReasons.map((reason) => (
+                        <li key={reason}>- {reason}</li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               )}

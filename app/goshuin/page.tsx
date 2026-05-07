@@ -43,6 +43,15 @@ type PilgrimMapSpot = {
   visitCount: number;
 };
 
+type PilgrimRoutePoint = {
+  id: string;
+  spotName: string;
+  lat: number;
+  lon: number;
+  visitedOn: string;
+  createdAt: string;
+};
+
 const GoshuinPilgrimMap = dynamic(() => import("./pilgrim-map"), { ssr: false });
 
 export default function GoshuinPage() {
@@ -61,6 +70,7 @@ export default function GoshuinPage() {
   const [deletingVisitId, setDeletingVisitId] = useState<string | null>(null);
   const [deletingPhotoId, setDeletingPhotoId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"list" | "map">("list");
+  const [mapViewMode, setMapViewMode] = useState<"spots" | "route" | "both">("both");
 
   useEffect(() => {
     const load = async () => {
@@ -153,6 +163,27 @@ export default function GoshuinPage() {
       }
     }
     return Array.from(bySpotKey.values());
+  }, [filteredItems]);
+
+  const pilgrimRoutePoints = useMemo(() => {
+    return filteredItems
+      .filter((item): item is VisitView & { spotLat: number; spotLon: number } => {
+        return typeof item.spotLat === "number" && typeof item.spotLon === "number";
+      })
+      .map((item) => ({
+        id: item.id,
+        spotName: item.spotName,
+        lat: item.spotLat,
+        lon: item.spotLon,
+        visitedOn: item.visitedOn,
+        createdAt: item.createdAt,
+      }))
+      .sort((a, b) => {
+        if (a.visitedOn === b.visitedOn) {
+          return a.createdAt.localeCompare(b.createdAt);
+        }
+        return a.visitedOn.localeCompare(b.visitedOn);
+      });
   }, [filteredItems]);
 
   const handleVisibilityChange = async (item: VisitView, nextPublic: boolean) => {
@@ -435,12 +466,45 @@ export default function GoshuinPage() {
               訪問済み聖地: {pilgrimMapSpots.length} 箇所 / 記録: {filteredItems.length} 件
             </p>
           </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMapViewMode("spots")}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                mapViewMode === "spots" ? "bg-torii text-white" : "bg-slate-100 text-slate-700"
+              }`}
+            >
+              スポット表示
+            </button>
+            <button
+              type="button"
+              onClick={() => setMapViewMode("route")}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                mapViewMode === "route" ? "bg-torii text-white" : "bg-slate-100 text-slate-700"
+              }`}
+            >
+              軌跡表示
+            </button>
+            <button
+              type="button"
+              onClick={() => setMapViewMode("both")}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                mapViewMode === "both" ? "bg-torii text-white" : "bg-slate-100 text-slate-700"
+              }`}
+            >
+              両方表示
+            </button>
+          </div>
           {!pilgrimMapSpots.length ? (
             <p className="text-sm text-slate-700">
               地図に表示できる訪問記録がありません。検索条件を調整するか、新しい参拝記録を追加してください。
             </p>
           ) : (
-            <GoshuinPilgrimMap spots={pilgrimMapSpots as PilgrimMapSpot[]} />
+            <GoshuinPilgrimMap
+              spots={pilgrimMapSpots as PilgrimMapSpot[]}
+              routePoints={pilgrimRoutePoints as PilgrimRoutePoint[]}
+              viewMode={mapViewMode}
+            />
           )}
         </section>
       )}

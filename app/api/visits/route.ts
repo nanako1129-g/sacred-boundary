@@ -50,7 +50,7 @@ type VisitRow = {
   memo: string | null;
   created_at: string;
   is_public: boolean;
-  spots: { name: string } | Array<{ name: string }> | null;
+  spots: { name: string; lat: number; lon: number } | Array<{ name: string; lat: number; lon: number }> | null;
 };
 
 export async function GET(request: NextRequest) {
@@ -61,7 +61,7 @@ export async function GET(request: NextRequest) {
 
   const { data: visits, error: visitsError } = await supabase
     .from("visits")
-    .select("id, visited_on, memo, created_at, is_public, spots(name)")
+    .select("id, visited_on, memo, created_at, is_public, spots(name, lat, lon)")
     .eq("user_id", user.id)
     .order("visited_on", { ascending: false });
 
@@ -94,17 +94,20 @@ export async function GET(request: NextRequest) {
     photosByVisitId.set(photo.visit_id, current);
   }
 
-  const payload = ((visits ?? []) as VisitRow[]).map((visit) => ({
-    id: visit.id,
-    visited_on: visit.visited_on,
-    memo: visit.memo,
-    created_at: visit.created_at,
-    is_public: visit.is_public,
-    spot_name: Array.isArray(visit.spots)
-      ? visit.spots[0]?.name ?? "不明なスポット"
-      : visit.spots?.name ?? "不明なスポット",
-    photos: photosByVisitId.get(visit.id) ?? [],
-  }));
+  const payload = ((visits ?? []) as VisitRow[]).map((visit) => {
+    const spot = Array.isArray(visit.spots) ? visit.spots[0] : visit.spots;
+    return {
+      id: visit.id,
+      visited_on: visit.visited_on,
+      memo: visit.memo,
+      created_at: visit.created_at,
+      is_public: visit.is_public,
+      spot_name: spot?.name ?? "不明なスポット",
+      spot_lat: typeof spot?.lat === "number" ? spot.lat : null,
+      spot_lon: typeof spot?.lon === "number" ? spot.lon : null,
+      photos: photosByVisitId.get(visit.id) ?? [],
+    };
+  });
 
   return NextResponse.json({ visits: payload });
 }

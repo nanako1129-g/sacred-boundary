@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
@@ -17,6 +18,8 @@ type VisitRow = {
   created_at: string;
   is_public: boolean;
   spot_name: string;
+  spot_lat: number | null;
+  spot_lon: number | null;
   photos: VisitPhoto[] | null;
 };
 
@@ -27,8 +30,20 @@ type VisitView = {
   memo: string;
   createdAt: string;
   isPublic: boolean;
+  spotLat: number | null;
+  spotLon: number | null;
   photos: Array<{ id: string; url: string }>;
 };
+
+type PilgrimMapSpot = {
+  spotName: string;
+  lat: number;
+  lon: number;
+  latestVisitedOn: string;
+  visitCount: number;
+};
+
+const GoshuinPilgrimMap = dynamic(() => import("./pilgrim-map"), { ssr: false });
 
 export default function GoshuinPage() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
@@ -45,6 +60,7 @@ export default function GoshuinPage() {
   const [editMemo, setEditMemo] = useState("");
   const [deletingVisitId, setDeletingVisitId] = useState<string | null>(null);
   const [deletingPhotoId, setDeletingPhotoId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"list" | "map">("list");
 
   useEffect(() => {
     const load = async () => {
@@ -86,6 +102,8 @@ export default function GoshuinPage() {
           memo: visit.memo ?? "",
           createdAt: visit.created_at,
           isPublic: visit.is_public,
+          spotLat: visit.spot_lat,
+          spotLon: visit.spot_lon,
           photos: (visit.photos ?? []).filter((photo) => !!photo.url),
         };
       });
@@ -107,6 +125,35 @@ export default function GoshuinPage() {
       return byName && byFrom && byTo;
     });
   }, [items, keyword, fromDate, toDate]);
+
+  const pilgrimMapSpots = useMemo(() => {
+    const bySpotKey = new Map<
+      string,
+      { spotName: string; lat: number; lon: number; latestVisitedOn: string; visitCount: number }
+    >();
+    for (const item of filteredItems) {
+      if (typeof item.spotLat !== "number" || typeof item.spotLon !== "number") {
+        continue;
+      }
+      const key = `${item.spotName}:${item.spotLat}:${item.spotLon}`;
+      const current = bySpotKey.get(key);
+      if (!current) {
+        bySpotKey.set(key, {
+          spotName: item.spotName,
+          lat: item.spotLat,
+          lon: item.spotLon,
+          latestVisitedOn: item.visitedOn,
+          visitCount: 1,
+        });
+        continue;
+      }
+      current.visitCount += 1;
+      if (item.visitedOn > current.latestVisitedOn) {
+        current.latestVisitedOn = item.visitedOn;
+      }
+    }
+    return Array.from(bySpotKey.values());
+  }, [filteredItems]);
 
   const handleVisibilityChange = async (item: VisitView, nextPublic: boolean) => {
     const {
@@ -320,6 +367,26 @@ export default function GoshuinPage() {
 
       {isLoggedIn && !isLoading && (
         <section className="rounded-xl border border-slate-300 bg-white p-4 shadow">
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab("list")}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                activeTab === "list" ? "bg-torii text-white" : "bg-slate-100 text-slate-700"
+              }`}
+            >
+              御朱印リスト
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("map")}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                activeTab === "map" ? "bg-torii text-white" : "bg-slate-100 text-slate-700"
+              }`}
+            >
+              巡礼マップ
+            </button>
+          </div>
           <div className="grid gap-3 md:grid-cols-3">
             <label className="text-xs text-slate-700">
               神社名で検索
@@ -352,7 +419,7 @@ export default function GoshuinPage() {
         </section>
       )}
 
-      {isLoggedIn && !isLoading && !filteredItems.length && (
+      {isLoggedIn && !isLoading && activeTab === "list" && !filteredItems.length && (
         <section className="rounded-xl border border-slate-300 bg-white p-4 shadow">
           <p className="text-sm text-slate-700">
             条件に合う記録がありません。検索条件を調整するか、地図から記録を追加してください。
@@ -360,7 +427,25 @@ export default function GoshuinPage() {
         </section>
       )}
 
-      {filteredItems.map((item) => (
+      {isLoggedIn && !isLoading && activeTab === "map" && (
+        <section className="rounded-xl border border-amber-200 bg-washi/95 p-4 shadow-ema">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+            <h2 className="text-lg font-semibold text-indigo-deep">巡礼マップ</h2>
+            <p className="text-xs text-indigo-deep/70">
+              訪問済み聖地: {pilgrimMapSpots.length} 箇所 / 記録: {filteredItems.length} 件
+            </p>
+          </div>
+          {!pilgrimMapSpots.length ? (
+            <p className="text-sm text-slate-700">
+              地図に表示できる訪問記録がありません。検索条件を調整するか、新しい参拝記録を追加してください。
+            </p>
+          ) : (
+            <GoshuinPilgrimMap spots={pilgrimMapSpots as PilgrimMapSpot[]} />
+          )}
+        </section>
+      )}
+
+      {activeTab === "list" && filteredItems.map((item) => (
         <section key={item.id} className="rounded-xl border border-amber-200 bg-washi/95 p-4 shadow-ema">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-lg font-semibold text-indigo-deep">{item.spotName}</h2>

@@ -44,6 +44,15 @@ async function getUserFromAuthHeader(request: NextRequest) {
   return { supabase, user, accessToken, error: null };
 }
 
+type VisitRow = {
+  id: string;
+  visited_on: string;
+  memo: string | null;
+  created_at: string;
+  is_public: boolean;
+  spots: { name: string } | Array<{ name: string }> | null;
+};
+
 export async function GET(request: NextRequest) {
   const { supabase, user, error } = await getUserFromAuthHeader(request);
   if (error || !user) {
@@ -85,13 +94,15 @@ export async function GET(request: NextRequest) {
     photosByVisitId.set(photo.visit_id, current);
   }
 
-  const payload = (visits ?? []).map((visit) => ({
+  const payload = ((visits ?? []) as VisitRow[]).map((visit) => ({
     id: visit.id,
     visited_on: visit.visited_on,
     memo: visit.memo,
     created_at: visit.created_at,
     is_public: visit.is_public,
-    spot_name: Array.isArray(visit.spots) ? visit.spots[0]?.name ?? "不明なスポット" : visit.spots?.name ?? "不明なスポット",
+    spot_name: Array.isArray(visit.spots)
+      ? visit.spots[0]?.name ?? "不明なスポット"
+      : visit.spots?.name ?? "不明なスポット",
     photos: photosByVisitId.get(visit.id) ?? [],
   }));
 

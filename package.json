@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "import:shrines": "node scripts/import-shrines.mjs --max=1000"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.3",

@@ -17,6 +17,7 @@ const INSIGHTS_JSON_PATH = path.join(process.cwd(), "public", "data", "insights.
 const requestLog = new Map<string, number[]>();
 
 type InsightRequestBody = {
+  spotId?: string;
   name?: string;
   elevation?: number;
   geomagF?: number;
@@ -43,6 +44,10 @@ type GeneratedInsight = {
   tradition_type: string;
   evidence: string[];
 };
+
+function buildSpotCacheKey(spotId: string) {
+  return `spot:${spotId}`;
+}
 
 function extractLegendKeywordsFromText(text: string): string[] {
   const seeds = [
@@ -148,19 +153,27 @@ function buildLocalGeneratedInsight(params: {
   });
 }
 
-async function writeInsightCache(name: string, generated: GeneratedInsight): Promise<void> {
+async function writeInsightCache(params: {
+  spotId?: string;
+  name: string;
+  generated: GeneratedInsight;
+}): Promise<void> {
   const dirPath = path.dirname(INSIGHTS_JSON_PATH);
   await mkdir(dirPath, { recursive: true });
   const cache = await readInsightsCache();
-  cache[name] = {
-    insight: generated.insight,
+  const nextValue = {
+    insight: params.generated.insight,
     generated_at: new Date().toISOString(),
-    summary: generated.summary,
-    legend_keywords: generated.legend_keywords,
-    era: generated.era,
-    tradition_type: generated.tradition_type,
-    evidence: generated.evidence,
+    summary: params.generated.summary,
+    legend_keywords: params.generated.legend_keywords,
+    era: params.generated.era,
+    tradition_type: params.generated.tradition_type,
+    evidence: params.generated.evidence,
   };
+  cache[params.name] = nextValue;
+  if (params.spotId) {
+    cache[buildSpotCacheKey(params.spotId)] = nextValue;
+  }
   await writeFile(INSIGHTS_JSON_PATH, `${JSON.stringify(cache, null, 2)}\n`, "utf-8");
 }
 
@@ -201,6 +214,7 @@ export async function POST(request: NextRequest) {
   }
 
   const name = body.name?.trim();
+  const spotId = body.spotId?.trim();
   const wikiSummary = body.wikiSummary?.trim();
   const elevation = body.elevation;
   const geomagF = body.geomagF;
@@ -308,7 +322,7 @@ Wikipedia情報: ${wikiSummary}`;
       });
 
   try {
-    await writeInsightCache(name, generated);
+    await writeInsightCache({ spotId, name, generated });
   } catch {
     return NextResponse.json(
       { error: "考察は生成されましたが、キャッシュ保存に失敗しました。" },

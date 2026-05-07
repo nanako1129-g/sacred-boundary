@@ -16,6 +16,10 @@ type CachedInsight = {
 
 type InsightsCache = Record<string, CachedInsight>;
 
+function buildSpotCacheKey(spotId: string) {
+  return `spot:${spotId}`;
+}
+
 async function readInsightsCache(): Promise<InsightsCache> {
   try {
     const raw = await readFile(INSIGHTS_JSON_PATH, "utf-8");
@@ -32,12 +36,14 @@ async function readInsightsCache(): Promise<InsightsCache> {
 export async function GET(request: NextRequest) {
   const cache = await readInsightsCache();
   const name = request.nextUrl.searchParams.get("name")?.trim();
+  const spotId = request.nextUrl.searchParams.get("spotId")?.trim();
 
-  if (!name) {
+  if (!name && !spotId) {
     return NextResponse.json({ insights: cache });
   }
 
-  const spotInsight = cache[name];
+  const spotInsight =
+    (spotId ? cache[buildSpotCacheKey(spotId)] : undefined) ?? (name ? cache[name] : undefined);
   if (!spotInsight) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }

@@ -49,6 +49,8 @@ create table if not exists public.photos (
 );
 
 create index if not exists idx_spots_type on public.spots(type);
+create index if not exists idx_spots_lat_lon on public.spots(lat, lon);
+create index if not exists idx_spots_type_lat_lon on public.spots(type, lat, lon);
 create index if not exists idx_visits_user_created on public.visits(user_id, created_at desc);
 create index if not exists idx_visits_spot on public.visits(spot_id);
 create index if not exists idx_visits_public on public.visits(is_public) where is_public = true;

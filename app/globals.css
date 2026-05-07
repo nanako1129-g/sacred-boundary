@@ -3,5 +3,10 @@
 @tailwind utilities;
 
 body {
-  @apply bg-washi bg-washi-texture bg-[length:140px_140px] text-indigo-deep;
+  @apply bg-[#f5e9ef] text-indigo-deep;
+  background-image: url("/images/sakura-bg.png");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }

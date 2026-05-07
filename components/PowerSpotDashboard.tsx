@@ -4,17 +4,7 @@ import "leaflet/dist/leaflet.css";
 
 import L from "leaflet";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { MapContainer, Marker, Popup, TileLayer, useMapEvents } from "react-leaflet";
 
 import { estimateGeomagneticData } from "@/lib/geomagnetism";
 import { ALL_SPOTS, Spot } from "@/lib/spots";
@@ -52,6 +42,45 @@ type VisitDraft = {
   memo: string;
   photos: File[];
 };
+
+type SpotMeta = {
+  region: string;
+  blessings: string[];
+};
+
+type EnrichedSpot = Spot & SpotMeta;
+type MapBounds = {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+};
+
+const UPLOAD_TARGET_MAX_BYTES = 900 * 1024;
+
+const SPOT_META: Record<string, SpotMeta> = {
+  osorezan: { region: "東北", blessings: ["厄除け", "心願成就", "先祖供養"] },
+  tateyama: { region: "中部", blessings: ["開運", "浄化", "山岳修行"] },
+  "kumano-nachi": { region: "近畿", blessings: ["厄除け", "開運", "心願成就"] },
+  koyasan: { region: "近畿", blessings: ["学業成就", "心願成就", "先祖供養"] },
+  izumo: { region: "中国", blessings: ["縁結び", "家庭円満", "開運"] },
+  bungui: { region: "中部", blessings: ["浄化", "健康祈願", "気力向上"] },
+  togakushi: { region: "中部", blessings: ["学業成就", "開運", "勝運"] },
+  ise: { region: "近畿", blessings: ["国家安泰", "開運", "心願成就"] },
+  yakushima: { region: "九州", blessings: ["浄化", "健康祈願", "自然崇敬"] },
+  kifune: { region: "近畿", blessings: ["縁結び", "復縁祈願", "水の加護"] },
+};
+
+function enrichSpot(spot: Spot): EnrichedSpot {
+  const defaultMeta: SpotMeta = {
+    region: spot.type === "random" ? "比較地点" : "未分類",
+    blessings: spot.type === "random" ? ["比較用"] : ["心願成就"],
+  };
+  return {
+    ...spot,
+    ...(SPOT_META[spot.id] ?? defaultMeta),
+  };
+}
 
 function isHttpUrl(value: string) {
   return /^https?:\/\/\S+$/i.test(value);
@@ -268,6 +297,7 @@ async function fetchWikipediaSummary(spotName: string) {
 }
 
 async function fetchInsight(payload: {
+  spotId: string;
   name: string;
   elevation: number;
   geomagF: number;
@@ -294,8 +324,12 @@ async function fetchInsight(payload: {
   };
 }
 
-async function fetchCachedInsight(spotName: string) {
-  const res = await fetch(`/api/insight/cache?name=${encodeURIComponent(spotName)}`);
+async function fetchCachedInsight(params: { spotId: string; spotName: string }) {
+  const query = new URLSearchParams({
+    spotId: params.spotId,
+    name: params.spotName,
+  });
+  const res = await fetch(`/api/insight/cache?${query.toString()}`);
   if (res.status === 404) {
     return null;
   }
@@ -311,6 +345,81 @@ async function fetchCachedInsight(spotName: string) {
     tradition_type?: string;
     evidence?: string[];
   };
+}
+
+function MapBoundsListener({ onBoundsChanged }: { onBoundsChanged: (bounds: MapBounds) => void }) {
+  const reportBounds = (nextBounds: L.LatLngBounds) => {
+    onBoundsChanged({
+      minLat: nextBounds.getSouth(),
+      maxLat: nextBounds.getNorth(),
+      minLon: nextBounds.getWest(),
+      maxLon: nextBounds.getEast(),
+    });
+  };
+
+  const map = useMapEvents({
+    moveend() {
+      reportBounds(map.getBounds());
+    },
+    zoomend() {
+      reportBounds(map.getBounds());
+    },
+  });
+
+  useEffect(() => {
+    reportBounds(map.getBounds());
+  }, [map]);
+
+  return null;
+}
+
+async function compressImageFile(file: File): Promise<File> {
+  if (file.size <= UPLOAD_TARGET_MAX_BYTES && ["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    return file;
+  }
+
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("画像読み込みに失敗しました。"));
+    reader.readAsDataURL(file);
+  });
+
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("画像変換に失敗しました。"));
+    img.src = dataUrl;
+  });
+
+  const maxSide = 1600;
+  const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("画像圧縮の初期化に失敗しました。");
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+
+  const qualities = [0.86, 0.76, 0.66, 0.56, 0.46];
+  for (const quality of qualities) {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/webp", quality);
+    });
+    if (!blob) {
+      continue;
+    }
+    if (blob.size <= UPLOAD_TARGET_MAX_BYTES || quality === qualities[qualities.length - 1]) {
+      const compactName = file.name.replace(/\.[^.]+$/, "") || "upload";
+      return new File([blob], `${compactName}.webp`, { type: "image/webp" });
+    }
+  }
+
+  throw new Error("画像圧縮に失敗しました。");
 }
 
 async function retry<T>(fn: () => Promise<T>, retries = 2, delayMs = 400): Promise<T> {
@@ -330,6 +439,12 @@ async function retry<T>(fn: () => Promise<T>, retries = 2, delayMs = 400): Promi
 
 export default function PowerSpotDashboard() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+  const [spots, setSpots] = useState<Spot[]>(ALL_SPOTS);
+  const [pendingBounds, setPendingBounds] = useState<MapBounds | null>(null);
+  const [mapBounds, setMapBounds] = useState<MapBounds | null>(null);
+  const [searchName, setSearchName] = useState("");
+  const [searchRegion, setSearchRegion] = useState("all");
+  const [searchBlessing, setSearchBlessing] = useState("all");
   const [details, setDetails] = useState<Record<string, SpotDetail>>({});
   const [activeSpotId, setActiveSpotId] = useState<string | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
@@ -343,8 +458,6 @@ export default function PowerSpotDashboard() {
   const [titleToast, setTitleToast] = useState<string | null>(null);
   const [discoveryToast, setDiscoveryToast] = useState<string | null>(null);
   const [failedImageSpotIds, setFailedImageSpotIds] = useState<Record<string, boolean>>({});
-  const [sortKey, setSortKey] = useState<"elevation" | "magnetic">("elevation");
-  const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
   const [isVisitModalOpen, setIsVisitModalOpen] = useState(false);
   const [visitSpot, setVisitSpot] = useState<Spot | null>(null);
   const [isVisitSubmitting, setIsVisitSubmitting] = useState(false);
@@ -356,16 +469,42 @@ export default function PowerSpotDashboard() {
   });
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [authUserEmail, setAuthUserEmail] = useState<string | null>(null);
+  const enrichedSpots = useMemo(() => spots.map((spot) => enrichSpot(spot)), [spots]);
+  const visibleSacredSpots = useMemo(
+    () => enrichedSpots.filter((spot) => spot.type === "sacred"),
+    [enrichedSpots],
+  );
+  const regionOptions = useMemo(
+    () => ["all", ...Array.from(new Set(visibleSacredSpots.map((spot) => spot.region)))],
+    [visibleSacredSpots],
+  );
+  const blessingOptions = useMemo(
+    () => ["all", ...Array.from(new Set(visibleSacredSpots.flatMap((spot) => spot.blessings)))],
+    [visibleSacredSpots],
+  );
+  const filteredSpots = useMemo(
+    () =>
+      visibleSacredSpots.filter((spot) => {
+        const byName = searchName.trim()
+          ? spot.name.toLowerCase().includes(searchName.trim().toLowerCase())
+          : true;
+        const byRegion = searchRegion === "all" ? true : spot.region === searchRegion;
+        const byBlessing =
+          searchBlessing === "all" ? true : spot.blessings.includes(searchBlessing);
+        return byName && byRegion && byBlessing;
+      }),
+    [visibleSacredSpots, searchName, searchRegion, searchBlessing],
+  );
   const totalSacredSpots = useMemo(
-    () => ALL_SPOTS.filter((spot) => spot.type === "sacred").length,
-    [],
+    () => spots.filter((spot) => spot.type === "sacred").length,
+    [spots],
   );
   const discoveredSacredCount = useMemo(
     () =>
       discoveredSpotIds.filter((id) =>
-        ALL_SPOTS.some((spot) => spot.id === id && spot.type === "sacred"),
+        spots.some((spot) => spot.id === id && spot.type === "sacred"),
       ).length,
-    [discoveredSpotIds],
+    [discoveredSpotIds, spots],
   );
   const discoveredProgressPercent =
     totalSacredSpots > 0 ? Math.round((discoveredSacredCount / totalSacredSpots) * 100) : 0;
@@ -393,40 +532,39 @@ export default function PowerSpotDashboard() {
   };
 
   useEffect(() => {
-    const loadAll = async () => {
-      const entries = await Promise.allSettled(
-        ALL_SPOTS.map(async (spot) => {
-          const elevation = await retry(() => fetchElevation(spot.lat, spot.lon), 2, 300);
-          return [
-            spot.id,
-            {
-              ...elevation,
-              magnetic: estimateGeomagneticData(spot.lat, spot.lon),
-            },
-          ] as const;
-        }),
-      );
+    if (!pendingBounds) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setMapBounds(pendingBounds);
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [pendingBounds]);
 
-      const successEntries = entries
-        .filter((entry): entry is PromiseFulfilledResult<readonly [string, SpotDetail]> => {
-          return entry.status === "fulfilled";
-        })
-        .map((entry) => entry.value);
+  useEffect(() => {
+    const loadSpots = async () => {
+      try {
+        const query = new URLSearchParams();
+        query.set("limit", "1200");
+        if (mapBounds) {
+          query.set("minLat", String(mapBounds.minLat));
+          query.set("maxLat", String(mapBounds.maxLat));
+          query.set("minLon", String(mapBounds.minLon));
+          query.set("maxLon", String(mapBounds.maxLon));
+        }
 
-      if (successEntries.length) {
-        setDetails((prev) => ({
-          ...prev,
-          ...Object.fromEntries(successEntries),
-        }));
-      }
-
-      if (entries.some((entry) => entry.status === "rejected")) {
-        setError("一部の標高データの取得に失敗しました。");
+        const result = await fetch(`/api/spots?${query.toString()}`);
+        if (!result.ok) {
+          throw new Error("スポット一覧の取得に失敗しました。");
+        }
+        const payload = (await result.json()) as { spots: Spot[] };
+        setSpots(payload.spots);
+      } catch {
+        // 取得失敗時は初期データを利用
       }
     };
-
-    void loadAll();
-  }, []);
+    void loadSpots();
+  }, [mapBounds]);
 
   useEffect(() => {
     try {
@@ -443,50 +581,8 @@ export default function PowerSpotDashboard() {
     }
   }, []);
 
-  const chartData = useMemo(() => {
-    const sacredValues = ALL_SPOTS.filter((s) => s.type === "sacred")
-      .map((s) => details[s.id]?.elevation)
-      .filter((v): v is number => typeof v === "number");
-    const randomValues = ALL_SPOTS.filter((s) => s.type === "random")
-      .map((s) => details[s.id]?.elevation)
-      .filter((v): v is number => typeof v === "number");
 
-    const avg = (list: number[]) =>
-      list.length ? Number((list.reduce((a, b) => a + b, 0) / list.length).toFixed(1)) : 0;
-
-    return [
-      { group: "聖地", averageElevation: avg(sacredValues), count: sacredValues.length },
-      { group: "ランダム", averageElevation: avg(randomValues), count: randomValues.length },
-    ];
-  }, [details]);
-
-  const tableRows = useMemo(() => {
-    const getSortValue = (spot: Spot) => {
-      const detail = details[spot.id];
-      if (!detail) {
-        return Number.NEGATIVE_INFINITY;
-      }
-      return sortKey === "elevation"
-        ? (detail.elevation ?? Number.NEGATIVE_INFINITY)
-        : detail.magnetic.totalIntensityNt;
-    };
-
-    return [...ALL_SPOTS].sort((a, b) => {
-      const diff = getSortValue(b) - getSortValue(a);
-      return sortOrder === "desc" ? diff : -diff;
-    });
-  }, [details, sortKey, sortOrder]);
-
-  const handleSortChange = (nextKey: "elevation" | "magnetic") => {
-    if (sortKey === nextKey) {
-      setSortOrder((prev) => (prev === "desc" ? "asc" : "desc"));
-      return;
-    }
-    setSortKey(nextKey);
-    setSortOrder("desc");
-  };
-
-  const activeSpot = ALL_SPOTS.find((spot) => spot.id === activeSpotId) ?? null;
+  const activeSpot = enrichedSpots.find((spot) => spot.id === activeSpotId) ?? null;
   const activeSacredSpot = activeSpot?.type === "sacred" ? activeSpot : null;
   const activeDetail = activeSpot ? details[activeSpot.id] : null;
   const activeWiki = activeSpot ? wikiDetails[activeSpot.id] : null;
@@ -562,7 +658,7 @@ export default function PowerSpotDashboard() {
     if (!justDiscoveredSpotId) {
       return;
     }
-    const discoveredSpot = ALL_SPOTS.find((spot) => spot.id === justDiscoveredSpotId);
+    const discoveredSpot = enrichedSpots.find((spot) => spot.id === justDiscoveredSpotId);
     if (!discoveredSpot || discoveredSpot.type !== "sacred") {
       return;
     }
@@ -571,7 +667,7 @@ export default function PowerSpotDashboard() {
       setDiscoveryToast(null);
     }, 2200);
     return () => clearTimeout(timer);
-  }, [justDiscoveredSpotId]);
+  }, [justDiscoveredSpotId, enrichedSpots]);
 
   const handleSpotClick = async (spot: Spot) => {
     setActiveSpotId(spot.id);
@@ -659,7 +755,10 @@ export default function PowerSpotDashboard() {
       }));
 
       try {
-        const cachedInsight = await fetchCachedInsight(spot.name);
+        const cachedInsight = await fetchCachedInsight({
+          spotId: spot.id,
+          spotName: spot.name,
+        });
         if (cachedInsight?.insight) {
           setInsightDetails((prev) => ({
             ...prev,
@@ -678,6 +777,7 @@ export default function PowerSpotDashboard() {
         }
 
         const insight = await fetchInsight({
+          spotId: spot.id,
           name: spot.name,
           elevation: currentDetail.elevation,
           geomagF: currentDetail.magnetic.totalIntensityNt,
@@ -724,15 +824,23 @@ export default function PowerSpotDashboard() {
     setIsVisitSubmitting(false);
   };
 
-  const handleVisitPhotoChange = (event: ChangeEvent<HTMLInputElement>) => {
+  const handleVisitPhotoChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files;
     if (!fileList) {
       return;
     }
-    setVisitDraft((prev) => ({
-      ...prev,
-      photos: Array.from(fileList).slice(0, 3),
-    }));
+    setVisitMessage("画像を最適化しています...");
+    try {
+      const selected = Array.from(fileList).slice(0, 3);
+      const compressed = await Promise.all(selected.map((file) => compressImageFile(file)));
+      setVisitDraft((prev) => ({
+        ...prev,
+        photos: compressed,
+      }));
+      setVisitMessage("画像を最適化しました。");
+    } catch {
+      setVisitMessage("画像の最適化に失敗しました。別の画像でお試しください。");
+    }
   };
 
   const handleVisitSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -783,8 +891,12 @@ export default function PowerSpotDashboard() {
       setTimeout(() => {
         closeVisitModal();
       }, 900);
-    } catch {
-      setVisitMessage("保存中にエラーが発生しました。もう一度お試しください。");
+    } catch (error) {
+      if (error instanceof Error && error.message) {
+        setVisitMessage(error.message);
+      } else {
+        setVisitMessage("保存中にエラーが発生しました。もう一度お試しください。");
+      }
     } finally {
       setIsVisitSubmitting(false);
     }
@@ -828,8 +940,56 @@ export default function PowerSpotDashboard() {
         </div>
       )}
       <h1 className="text-2xl font-bold md:text-3xl">
-        パワースポット環境データ分析（聖地 vs ランダム）
+        ⛩️ パワースポット環境データ分析（御朱印集め）
       </h1>
+      <p className="text-sm leading-relaxed text-indigo-deep/80">
+        使い方: 検索で神社を絞る → 地図のピンをクリック → 「訪問を記録する」で感想と写真を保存 →
+        「登録したデータを見る」から御朱印帳を確認できます。
+      </p>
+      <section className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="text-xs text-slate-700">
+            名前で検索
+            <input
+              value={searchName}
+              onChange={(event) => setSearchName(event.target.value)}
+              placeholder="例: 伊勢、熊野"
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            />
+          </label>
+          <label className="text-xs text-slate-700">
+            地域で絞る
+            <select
+              value={searchRegion}
+              onChange={(event) => setSearchRegion(event.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              {regionOptions.map((region) => (
+                <option key={region} value={region}>
+                  {region === "all" ? "すべての地域" : region}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-slate-700">
+            目的（ご利益）で絞る
+            <select
+              value={searchBlessing}
+              onChange={(event) => setSearchBlessing(event.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              {blessingOptions.map((blessing) => (
+                <option key={blessing} value={blessing}>
+                  {blessing === "all" ? "すべてのご利益" : blessing}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">
+          表示中: {filteredSpots.length}地点（聖地・パワースポット全{visibleSacredSpots.length}地点）
+        </p>
+      </section>
       <EmaCard className="border-amber-200 bg-amber-50 p-4">
         <div className="mb-2 flex items-center justify-between text-sm">
           <p className="font-semibold text-amber-900">巡礼進捗</p>
@@ -886,7 +1046,8 @@ export default function PowerSpotDashboard() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
-          {ALL_SPOTS.map((spot) => (
+          <MapBoundsListener onBoundsChanged={setPendingBounds} />
+          {filteredSpots.map((spot) => (
             <Marker
               key={spot.id}
               position={[spot.lat, spot.lon]}
@@ -929,6 +1090,20 @@ export default function PowerSpotDashboard() {
                 <span className="font-semibold">分類:</span>{" "}
                 {activeSpot.type === "sacred" ? "聖地" : "ランダム"}
               </p>
+              <p>
+                <span className="font-semibold">地域:</span> {activeSpot.region}
+              </p>
+              <div className="flex flex-wrap items-center gap-1 pt-1">
+                <span className="font-semibold">ご利益:</span>
+                {activeSpot.blessings.map((blessing) => (
+                  <span
+                    key={blessing}
+                    className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800"
+                  >
+                    {blessing}
+                  </span>
+                ))}
+              </div>
               <p>
                 <span className="font-semibold">標高:</span>{" "}
                 {loadingId === activeSpot.id
@@ -1193,24 +1368,6 @@ export default function PowerSpotDashboard() {
           {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
         </section>
 
-        <section className="rounded-xl border border-slate-300 bg-white p-4 shadow">
-          <h2 className="mb-2 text-lg font-semibold">標高比較（平均）</h2>
-          <p className="mb-4 text-xs text-slate-500">
-            聖地10地点とランダム10地点の平均標高を比較しています。
-          </p>
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="group" />
-                <YAxis unit="m" />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="averageElevation" name="平均標高" fill="#ef4444" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
       </div>
 
       <section className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">

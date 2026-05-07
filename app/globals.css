@@ -3,5 +3,5 @@
 @tailwind utilities;
 
 body {
-  @apply bg-slate-100 text-slate-900;
+  @apply bg-washi bg-washi-texture bg-[length:140px_140px] text-indigo-deep;
 }

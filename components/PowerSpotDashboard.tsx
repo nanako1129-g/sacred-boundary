@@ -3,7 +3,7 @@
 import "leaflet/dist/leaflet.css";
 
 import L from "leaflet";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
 import {
   Bar,
@@ -18,6 +18,8 @@ import {
 
 import { estimateGeomagneticData } from "@/lib/geomagnetism";
 import { ALL_SPOTS, Spot } from "@/lib/spots";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { EmaCard } from "@/components/ui/ema-card";
 
 type SpotDetail = {
   elevation: number | null;
@@ -43,6 +45,12 @@ type InsightDetail = {
   generatedAt?: string;
   sourceModel?: string;
   isFallback?: boolean;
+};
+
+type VisitDraft = {
+  visitedOn: string;
+  memo: string;
+  photos: File[];
 };
 
 function isHttpUrl(value: string) {
@@ -321,6 +329,7 @@ async function retry<T>(fn: () => Promise<T>, retries = 2, delayMs = 400): Promi
 }
 
 export default function PowerSpotDashboard() {
+  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [details, setDetails] = useState<Record<string, SpotDetail>>({});
   const [activeSpotId, setActiveSpotId] = useState<string | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
@@ -336,6 +345,17 @@ export default function PowerSpotDashboard() {
   const [failedImageSpotIds, setFailedImageSpotIds] = useState<Record<string, boolean>>({});
   const [sortKey, setSortKey] = useState<"elevation" | "magnetic">("elevation");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const [isVisitModalOpen, setIsVisitModalOpen] = useState(false);
+  const [visitSpot, setVisitSpot] = useState<Spot | null>(null);
+  const [isVisitSubmitting, setIsVisitSubmitting] = useState(false);
+  const [visitMessage, setVisitMessage] = useState<string | null>(null);
+  const [visitDraft, setVisitDraft] = useState<VisitDraft>({
+    visitedOn: new Date().toISOString().slice(0, 10),
+    memo: "",
+    photos: [],
+  });
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [authUserEmail, setAuthUserEmail] = useState<string | null>(null);
   const totalSacredSpots = useMemo(
     () => ALL_SPOTS.filter((spot) => spot.type === "sacred").length,
     [],
@@ -352,6 +372,25 @@ export default function PowerSpotDashboard() {
   const pilgrimTitle = getPilgrimTitle(discoveredProgressPercent);
   const pilgrimRank = getPilgrimRank(discoveredProgressPercent);
   const prevPilgrimRankRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    void supabase.auth.getSession().then(({ data }) => {
+      setIsLoggedIn(!!data.session);
+      setAuthUserEmail(data.session?.user.email ?? null);
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsLoggedIn(!!session);
+      setAuthUserEmail(session?.user.email ?? null);
+    });
+
+    return () => authListener.subscription.unsubscribe();
+  }, [supabase]);
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setVisitMessage("ログアウトしました。");
+  };
 
   useEffect(() => {
     const loadAll = async () => {
@@ -448,6 +487,7 @@ export default function PowerSpotDashboard() {
   };
 
   const activeSpot = ALL_SPOTS.find((spot) => spot.id === activeSpotId) ?? null;
+  const activeSacredSpot = activeSpot?.type === "sacred" ? activeSpot : null;
   const activeDetail = activeSpot ? details[activeSpot.id] : null;
   const activeWiki = activeSpot ? wikiDetails[activeSpot.id] : null;
   const activeSpotFixedMedia = activeSpot ? FIXED_SPOT_MEDIA[activeSpot.name] : undefined;
@@ -667,8 +707,116 @@ export default function PowerSpotDashboard() {
     }
   };
 
+  const openVisitModal = (spot: Spot) => {
+    setVisitSpot(spot);
+    setVisitMessage(null);
+    setVisitDraft({
+      visitedOn: new Date().toISOString().slice(0, 10),
+      memo: "",
+      photos: [],
+    });
+    setIsVisitModalOpen(true);
+  };
+
+  const closeVisitModal = () => {
+    setIsVisitModalOpen(false);
+    setVisitSpot(null);
+    setIsVisitSubmitting(false);
+  };
+
+  const handleVisitPhotoChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.target.files;
+    if (!fileList) {
+      return;
+    }
+    setVisitDraft((prev) => ({
+      ...prev,
+      photos: Array.from(fileList).slice(0, 3),
+    }));
+  };
+
+  const handleVisitSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!visitSpot) {
+      return;
+    }
+    if (!isLoggedIn) {
+      setVisitMessage("記録の保存にはログインが必要です。");
+      return;
+    }
+
+    setIsVisitSubmitting(true);
+    setVisitMessage(null);
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session?.access_token) {
+        setVisitMessage("ログイン状態を確認できませんでした。再ログインをお試しください。");
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("spotId", visitSpot.id);
+      formData.append("visitedOn", visitDraft.visitedOn);
+      formData.append("memo", visitDraft.memo);
+      visitDraft.photos.forEach((photo) => {
+        formData.append("photos", photo);
+      });
+
+      const response = await fetch("/api/visits", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const failed = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(failed?.error ?? "訪問記録の保存に失敗しました。");
+      }
+
+      setVisitMessage(`${visitSpot.name} の訪問記録を保存しました。`);
+      setTimeout(() => {
+        closeVisitModal();
+      }, 900);
+    } catch {
+      setVisitMessage("保存中にエラーが発生しました。もう一度お試しください。");
+    } finally {
+      setIsVisitSubmitting(false);
+    }
+  };
+
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 md:p-8">
+      <div className="flex items-center justify-end gap-2">
+        {isLoggedIn ? (
+          <>
+            <p className="rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800">
+              ログイン中: {authUserEmail ?? "ユーザー"}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                void handleSignOut();
+              }}
+              className="rounded-md border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 transition hover:bg-slate-50"
+            >
+              ログアウト
+            </button>
+          </>
+        ) : (
+          <a
+            href="/login"
+            className="rounded-md border border-torii/40 bg-white px-3 py-1 text-xs font-medium text-torii transition hover:bg-torii/5"
+          >
+            ログイン
+          </a>
+        )}
+      </div>
       {titleToast && (
         <div className="fixed right-4 top-4 z-[1000] animate-pulse rounded-lg border border-amber-300 bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-900 shadow-lg">
           {titleToast}
@@ -682,36 +830,7 @@ export default function PowerSpotDashboard() {
       <h1 className="text-2xl font-bold md:text-3xl">
         パワースポット環境データ分析（聖地 vs ランダム）
       </h1>
-      <section className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
-        <h2 className="mb-2 text-lg font-semibold text-slate-900">この分析で見ていること</h2>
-        <p className="text-sm leading-relaxed text-slate-700">
-          このアプリは、聖地とランダム地点の環境データを同じ条件で比較し、
-          「なぜ特別な場所と感じられてきたか」を複合的に読み解きます。
-          1つの要素だけで断定せず、複数の視点を重ねて解釈します。
-        </p>
-        <div className="mt-3 grid gap-2 text-xs text-slate-700 md:grid-cols-2">
-          <p>
-            <span className="font-semibold text-slate-900">1) 地形要素:</span>{" "}
-            標高データ（国土地理院API）から、非日常性の出やすい地形かを確認。
-          </p>
-          <p>
-            <span className="font-semibold text-slate-900">2) 地磁気要素:</span>{" "}
-            日本平均（約46000nT）との差分を用いて、場の特異性を評価。
-          </p>
-          <p>
-            <span className="font-semibold text-slate-900">3) 歴史要素:</span>{" "}
-            Wikipedia要約の情報量や文脈から、由来の厚みを反映。
-          </p>
-          <p>
-            <span className="font-semibold text-slate-900">4) 伝承要素:</span>{" "}
-            AI考察から抽出した伝承キーワードで、物語性を加点。
-          </p>
-        </div>
-        <p className="mt-3 text-xs text-slate-500">
-          ※「呼ばれ度」は体験を補助する探索指標です。学術的な断定ではなく、現地へ向かう動機づけを目的にしています。
-        </p>
-      </section>
-      <section className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+      <EmaCard className="border-amber-200 bg-amber-50 p-4">
         <div className="mb-2 flex items-center justify-between text-sm">
           <p className="font-semibold text-amber-900">巡礼進捗</p>
           <p className="text-amber-800">
@@ -728,7 +847,32 @@ export default function PowerSpotDashboard() {
         <p className="mt-2 text-xs text-amber-800">
           達成率: {discoveredProgressPercent}%（聖地をクリックすると記録されます）
         </p>
-      </section>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={!activeSacredSpot}
+            onClick={() => {
+              if (activeSacredSpot) {
+                openVisitModal(activeSacredSpot);
+              }
+            }}
+            className="rounded-md bg-torii px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#b83e26] disabled:cursor-not-allowed disabled:bg-slate-300"
+          >
+            自分のデータを登録する
+          </button>
+          <a
+            href="/goshuin"
+            className="rounded-md border border-gold-soft/80 bg-white px-3 py-2 text-xs font-semibold text-indigo-deep transition hover:bg-gold-soft/10"
+          >
+            登録したデータを見る
+          </a>
+        </div>
+        {!activeSacredSpot && (
+          <p className="mt-2 text-xs text-amber-800/90">
+            先に地図上の聖地ピンを選ぶと、訪問記録モーダルを開けます。
+          </p>
+        )}
+      </EmaCard>
 
       <div className="h-[500px] overflow-hidden rounded-xl border border-slate-300 bg-white shadow">
         <MapContainer
@@ -814,6 +958,24 @@ export default function PowerSpotDashboard() {
               )}
               {activeSpot.type === "sacred" && (
                 <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 p-3">
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openVisitModal(activeSpot)}
+                      className="rounded-md bg-torii px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#b83e26]"
+                    >
+                      訪問を記録する
+                    </button>
+                    {!isLoggedIn && (
+                      <span className="text-xs text-rose-800">
+                        保存には
+                        <a href="/login" className="mx-1 underline">
+                          ログイン
+                        </a>
+                        が必要です（閲覧はこのまま可能）
+                      </span>
+                    )}
+                  </div>
                   <p className="mb-1 font-semibold text-rose-900">歴史・由来</p>
                   {activeWiki?.status === "loading" && <p>取得中...</p>}
                   {activeWiki?.status === "success" && (
@@ -1051,83 +1213,124 @@ export default function PowerSpotDashboard() {
         </section>
       </div>
 
-      <section className="rounded-xl border border-slate-300 bg-white p-4 shadow">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold">全20地点データ一覧</h2>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-slate-600">ソート:</span>
-            <button
-              type="button"
-              onClick={() => handleSortChange("elevation")}
-              className={`rounded-md border px-3 py-1 ${
-                sortKey === "elevation"
-                  ? "border-rose-300 bg-rose-100 text-rose-800"
-                  : "border-slate-300 bg-white text-slate-700"
-              }`}
-            >
-              標高 {sortKey === "elevation" ? (sortOrder === "desc" ? "▼" : "▲") : ""}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSortChange("magnetic")}
-              className={`rounded-md border px-3 py-1 ${
-                sortKey === "magnetic"
-                  ? "border-sky-300 bg-sky-100 text-sky-800"
-                  : "border-slate-300 bg-white text-slate-700"
-              }`}
-            >
-              地磁気強度 {sortKey === "magnetic" ? (sortOrder === "desc" ? "▼" : "▲") : ""}
-            </button>
+      <section className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
+        <h2 className="mb-2 text-lg font-semibold text-slate-900">この分析で見ていること</h2>
+        <p className="text-sm leading-relaxed text-slate-700">
+          このアプリは、聖地とランダム地点の環境データを同じ条件で比較し、
+          「なぜ特別な場所と感じられてきたか」を複合的に読み解きます。
+          1つの要素だけで断定せず、複数の視点を重ねて解釈します。
+        </p>
+        <div className="mt-3 grid gap-2 text-xs text-slate-700 md:grid-cols-2">
+          <p>
+            <span className="font-semibold text-slate-900">1) 地形要素:</span>{" "}
+            標高データ（国土地理院API）から、非日常性の出やすい地形かを確認。
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">2) 地磁気要素:</span>{" "}
+            日本平均（約46000nT）との差分を用いて、場の特異性を評価。
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">3) 歴史要素:</span>{" "}
+            Wikipedia要約の情報量や文脈から、由来の厚みを反映。
+          </p>
+          <p>
+            <span className="font-semibold text-slate-900">4) 伝承要素:</span>{" "}
+            AI考察から抽出した伝承キーワードで、物語性を加点。
+          </p>
+        </div>
+        <p className="mt-3 text-xs text-slate-500">
+          ※「呼ばれ度」は体験を補助する探索指標です。学術的な断定ではなく、現地へ向かう動機づけを目的にしています。
+        </p>
+      </section>
+
+      {isVisitModalOpen && visitSpot && (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-indigo-deep/35 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-torii/30 bg-washi p-5 shadow-ema">
+            <div className="mb-4">
+              <p className="text-sm font-semibold text-torii">御朱印記録</p>
+              <h3 className="text-xl font-bold text-indigo-deep">{visitSpot.name}</h3>
+              <p className="mt-1 text-xs text-indigo-deep/70">
+                感想と写真を残して、あとから御朱印帳ページで見返せます。
+              </p>
+            </div>
+
+            <form className="space-y-4" onSubmit={handleVisitSubmit}>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium text-indigo-deep">訪問日</span>
+                <input
+                  type="date"
+                  value={visitDraft.visitedOn}
+                  onChange={(event) =>
+                    setVisitDraft((prev) => ({
+                      ...prev,
+                      visitedOn: event.target.value,
+                    }))
+                  }
+                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-torii/30 transition focus:ring-2"
+                  required
+                />
+              </label>
+
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium text-indigo-deep">感想</span>
+                <textarea
+                  value={visitDraft.memo}
+                  onChange={(event) =>
+                    setVisitDraft((prev) => ({
+                      ...prev,
+                      memo: event.target.value,
+                    }))
+                  }
+                  rows={4}
+                  placeholder="例: 境内の空気が澄んでいて、朝の参道がとても心地よかった。"
+                  className="w-full resize-none rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-torii/30 transition focus:ring-2"
+                />
+              </label>
+
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium text-indigo-deep">写真（最大3枚）</span>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  onChange={handleVisitPhotoChange}
+                  className="w-full rounded-md border border-dashed border-slate-300 bg-white px-3 py-2 text-xs text-indigo-deep"
+                />
+                {!!visitDraft.photos.length && (
+                  <p className="mt-2 text-xs text-indigo-deep/80">
+                    選択中: {visitDraft.photos.map((photo) => photo.name).join(" / ")}
+                  </p>
+                )}
+              </label>
+
+              {visitMessage && <p className="text-xs font-medium text-torii">{visitMessage}</p>}
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeVisitModal}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
+                >
+                  閉じる
+                </button>
+                <button
+                  type="submit"
+                  disabled={isVisitSubmitting}
+                  className="rounded-md bg-torii px-3 py-2 text-sm font-semibold text-white transition hover:bg-[#b83e26] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isVisitSubmitting ? "保存中..." : "記録を保存"}
+                </button>
+              </div>
+            </form>
+
+            {!isLoggedIn && (
+              <p className="mt-3 text-xs text-indigo-deep/70">
+                ※ <a href="/login" className="underline">ログイン</a>後に Supabase へ訪問記録と写真を保存できます。
+              </p>
+            )}
           </div>
         </div>
-
-        <div className="overflow-x-auto">
-          <table className="min-w-full border-collapse text-sm">
-            <thead>
-              <tr className="bg-slate-100 text-left">
-                <th className="border border-slate-300 px-3 py-2">地点名</th>
-                <th className="border border-slate-300 px-3 py-2">分類（聖地orランダム）</th>
-                <th className="border border-slate-300 px-3 py-2">
-                  標高(m) {sortKey === "elevation" ? (sortOrder === "desc" ? "▼" : "▲") : ""}
-                </th>
-                <th className="border border-slate-300 px-3 py-2">
-                  地磁気強度(nT) {sortKey === "magnetic" ? (sortOrder === "desc" ? "▼" : "▲") : ""}
-                </th>
-                <th className="border border-slate-300 px-3 py-2">偏角(°)</th>
-                <th className="border border-slate-300 px-3 py-2">伏角(°)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tableRows.map((spot) => {
-                const detail = details[spot.id];
-                return (
-                  <tr
-                    key={spot.id}
-                    className={spot.type === "sacred" ? "bg-rose-50" : "bg-sky-50"}
-                  >
-                    <td className="border border-slate-300 px-3 py-2 font-medium">{spot.name}</td>
-                    <td className="border border-slate-300 px-3 py-2">
-                      {spot.type === "sacred" ? "聖地" : "ランダム"}
-                    </td>
-                    <td className="border border-slate-300 px-3 py-2">
-                      {detail?.elevation != null ? detail.elevation : "未取得"}
-                    </td>
-                    <td className="border border-slate-300 px-3 py-2">
-                      {detail ? detail.magnetic.totalIntensityNt : "未取得"}
-                    </td>
-                    <td className="border border-slate-300 px-3 py-2">
-                      {detail ? detail.magnetic.declinationDeg : "未取得"}
-                    </td>
-                    <td className="border border-slate-300 px-3 py-2">
-                      {detail ? detail.magnetic.inclinationDeg : "未取得"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      )}
     </div>
   );
 }

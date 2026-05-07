@@ -31,6 +31,7 @@ export default function GoshuinPilgrimMap({ spots, routePoints, viewMode }: Pilg
   const routeLinePositions: Array<[number, number]> = routePoints.map((point) => [point.lat, point.lon]);
   const showSpots = viewMode === "spots" || viewMode === "both";
   const showRoute = (viewMode === "route" || viewMode === "both") && routeLinePositions.length >= 2;
+  const markerColor = "#D81B60";
 
   return (
     <div className="overflow-hidden rounded-lg border border-amber-100">
@@ -40,14 +41,24 @@ export default function GoshuinPilgrimMap({ spots, routePoints, viewMode }: Pilg
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
         {showRoute && (
-          <Polyline
-            positions={routeLinePositions}
-            pathOptions={{
-              color: "#1F2A44",
-              opacity: 0.85,
-              weight: 4,
-            }}
-          />
+          <>
+            <Polyline
+              positions={routeLinePositions}
+              pathOptions={{
+                color: "#FFE082",
+                opacity: 0.65,
+                weight: 12,
+              }}
+            />
+            <Polyline
+              positions={routeLinePositions}
+              pathOptions={{
+                color: "#EC407A",
+                opacity: 0.95,
+                weight: 5,
+              }}
+            />
+          </>
         )}
         {showSpots &&
           spots.map((spot) => (
@@ -56,9 +67,9 @@ export default function GoshuinPilgrimMap({ spots, routePoints, viewMode }: Pilg
               center={[spot.lat, spot.lon]}
               radius={9}
               pathOptions={{
-                color: "#D24A2E",
-                fillColor: "#D24A2E",
-                fillOpacity: 0.75,
+                color: markerColor,
+                fillColor: markerColor,
+                fillOpacity: 0.82,
                 weight: 2,
               }}
             >
@@ -78,9 +89,9 @@ export default function GoshuinPilgrimMap({ spots, routePoints, viewMode }: Pilg
               center={[point.lat, point.lon]}
               radius={5}
               pathOptions={{
-                color: "#1F2A44",
-                fillColor: "#C8A96B",
-                fillOpacity: 0.9,
+                color: markerColor,
+                fillColor: "#F48FB1",
+                fillOpacity: 0.95,
                 weight: 1.5,
               }}
             >
